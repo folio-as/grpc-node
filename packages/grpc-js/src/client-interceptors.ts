@@ -15,6 +15,7 @@
  *
  */
 
+import { trace } from '@opentelemetry/api';
 import { Metadata } from './metadata';
 import {
   StatusObject,
@@ -393,12 +394,17 @@ class BaseInterceptingCall implements InterceptingCallInterface {
       onReceiveMetadata: (metadata) => {
         interceptingListener?.onReceiveMetadata?.(metadata);
       },
-      onReceiveMessage: (message) => {
+      onReceiveMessage: (message: Buffer) => {
+        const activeSpan = trace.getActiveSpan();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let deserialized: any;
         try {
+          activeSpan?.addEvent('Start deserializing response', { length: message.length });
           deserialized = this.methodDefinition.responseDeserialize(message);
+          activeSpan?.addEvent('Done deserializing response');
         } catch (e) {
+          activeSpan?.addEvent('Got error deserializing response').recordException(e as any);
+
           readError = {
             code: Status.INTERNAL,
             details: `Response message parsing error: ${getErrorMessage(e)}`,
