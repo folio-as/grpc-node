@@ -398,11 +398,17 @@ class BaseInterceptingCall implements InterceptingCallInterface {
         interceptingListener?.onReceiveMetadata?.(metadata);
       },
       onReceiveMessage: message => {
-        const activeSpan = trace.getActiveSpan();
+        const activeSpan = this.methodDefinition.path.startsWith(
+          '/google.pubsub.',
+        )
+          ? undefined
+          : trace.getActiveSpan();
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         let deserialized: any;
         try {
-          activeSpan?.addEvent('Start deserializing response', { length: message.length });
+          activeSpan?.addEvent('Start deserializing response', {
+            length: message.length,
+          });
           deserialized = this.methodDefinition.responseDeserialize(message);
           activeSpan?.addEvent('Done deserializing response');
         } catch (e) {
