@@ -390,6 +390,8 @@ class BaseInterceptingCall implements InterceptingCallInterface {
     interceptingListener?: Partial<InterceptingListener>
   ): void {
     let readError: StatusObject | null = null;
+    let isAsync = false;
+    let statusForAsyncMessage: StatusObject | null = null;
     this.call.start(metadata, {
       onReceiveMetadata: (metadata) => {
         interceptingListener?.onReceiveMetadata?.(metadata);
@@ -401,30 +403,70 @@ class BaseInterceptingCall implements InterceptingCallInterface {
           ? undefined
           : trace.getActiveSpan();
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        let deserialized: any;
-        try {
-          activeSpan?.addEvent('Start deserializing response', {
+        if (
+          message.length > 5_000_000 &&
+          // @ts-expect-error
+          typeof globalThis.deserializeMessageInWorker === 'function'
+        ) {
+          isAsync = true;
+          activeSpan?.addEvent('Start deserializing response in worker', {
             length: message.length,
           });
-          deserialized = this.methodDefinition.responseDeserialize(message);
-          activeSpan?.addEvent('Done deserializing response');
-        } catch (e) {
-          activeSpan?.addEvent('Got error deserializing response').recordException(e as any);
+          globalThis
+            // @ts-expect-error
+            .deserializeMessageInWorker(this.methodDefinition.path, message)
+            .then((deserialized: any) => {
+              activeSpan?.addEvent('Done deserializing response in worker');
+              interceptingListener?.onReceiveMessage?.(deserialized);
+              if (statusForAsyncMessage) {
+                interceptingListener?.onReceiveStatus?.(statusForAsyncMessage);
+              }
+            })
+            .catch((e: unknown) => {
+              activeSpan
+                ?.addEvent('Got error deserializing response')
+                .recordException(e as any);
 
-          readError = {
-            code: Status.INTERNAL,
-            details: `Response message parsing error: ${getErrorMessage(e)}`,
-            metadata: new Metadata(),
-          };
-          this.call.cancelWithStatus(readError.code, readError.details);
-          return;
+              readError = {
+                code: Status.INTERNAL,
+                details: `Response message parsing error: ${getErrorMessage(
+                  e,
+                )}`,
+                metadata: new Metadata(),
+              };
+              this.call.cancelWithStatus(readError.code, readError.details);
+              interceptingListener?.onReceiveStatus?.(readError);
+            });
+        } else {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let deserialized: any;
+          try {
+            activeSpan?.addEvent('Start deserializing response', {
+              length: message.length,
+            });
+            deserialized = this.methodDefinition.responseDeserialize(message);
+            activeSpan?.addEvent('Done deserializing response');
+          } catch (e) {
+            activeSpan
+              ?.addEvent('Got error deserializing response')
+              .recordException(e as any);
+
+            readError = {
+              code: Status.INTERNAL,
+              details: `Response message parsing error: ${getErrorMessage(e)}`,
+              metadata: new Metadata(),
+            };
+            this.call.cancelWithStatus(readError.code, readError.details);
+            return;
+          }
+          interceptingListener?.onReceiveMessage?.(deserialized);
         }
-        interceptingListener?.onReceiveMessage?.(deserialized);
       },
       onReceiveStatus: (status) => {
         if (readError) {
           interceptingListener?.onReceiveStatus?.(readError);
+        } else if (isAsync) {
+          statusForAsyncMessage = status;
         } else {
           interceptingListener?.onReceiveStatus?.(status);
         }
